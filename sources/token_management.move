@@ -1,15 +1,15 @@
 module veralux::token_management {
     use sui::coin::{Self, Coin, TreasuryCap};
-    use sui::object::{Self, UID};
-    use sui::transfer;
-    use sui::tx_context::{Self, TxContext};
+    use sui::object::UID;
+    use sui::tx_context::TxContext;
     use sui::event;
-    use sui::vec;
     use sui::table::{Self, Table};
-    use std::option;
+
+    // Token witness struct - Must match module name in uppercase
+    public struct TOKEN_MANAGEMENT has drop {}
 
     // Constants
-    const TOTAL_SUPPLY: u64 = 100_000_000_000_000_000_000;  // 100B LUX with 9 decimals
+    const TOTAL_SUPPLY: u128 = 100_000_000_000_000_000_000;  // 100B LUX with 9 decimals
     const BASIS_POINTS: u64 = 10_000;  // For percentage calculations
     const DAILY_EPOCH_WINDOW: u64 = 720;  // Approx 24h (~2 min per epoch)
     const TIMELOCK_EPOCHS: u64 = 2160;  // 72h for tax/authority changes
@@ -29,11 +29,14 @@ module veralux::token_management {
     const E_HISTORY_OVERFLOW: u64 = 8;
     const E_INVALID_INPUT: u64 = 9;
 
-    // Token struct
-    struct LUX has drop {}
+    // Allocation struct to fix vector issue
+    public struct Allocation has copy, drop {
+        to: address,
+        amount: u64,
+    }
 
     // Global configuration
-    struct TokenConfig has key {
+    public struct TokenConfig has key, store {
         id: UID,
         total_minted: u64,
         mint_authority: address,
@@ -52,31 +55,36 @@ module veralux::token_management {
         pending_pause_flag: bool,
         pause_timelock_end: u64,
         pause_update_voters: vector<address>,
-        treasury_cap: TreasuryCap<LUX>,
+        treasury_cap: TreasuryCap<TOKEN_MANAGEMENT>,
         governance_address: address,
         liquidity_address: address,
         burn_address: address,  // Can be same as treasury for burning
     }
 
     // User data registry
-    struct UserRegistry has key {
+    public struct UserRegistry has key, store {
         id: UID,
         users: Table<address, UserData>,
     }
 
-    struct UserData has store {
+    public struct UserData has store {
         last_transfer_epoch: u64,
-        sell_history: vector<(u64, u64)>,  // (epoch, amount)
+        sell_history: vector<SellRecord>,
+    }
+
+    public struct SellRecord has store, copy, drop {
+        epoch: u64,
+        amount: u64,
     }
 
     // Events
-    struct MintEvent has copy, drop {
+    public struct MintEvent has copy, drop {
         amount: u64,
         to: address,
         epoch: u64,
     }
 
-    struct TransferEvent has copy, drop {
+    public struct TransferEvent has copy, drop {
         from: address,
         to: address,
         amount: u64,
@@ -85,26 +93,25 @@ module veralux::token_management {
         taxed: bool,
     }
 
-    struct UpdateEvent has copy, drop {
+    public struct UpdateEvent has copy, drop {
         change: vector<u8>,
         epoch: u64,
     }
 
-    struct PauseEvent has copy, drop {
+    public struct PauseEvent has copy, drop {
         paused: bool,
         epoch: u64,
     }
 
-    struct BurnEvent has copy, drop {
+    public struct BurnEvent has copy, drop {
         amount: u64,
         epoch: u64,
     }
 
-    // Initialization function
-    #[init]
-    public fun init(ctx: &mut TxContext) {
+    // Initialization function - Fixed witness type
+    fun init(witness: TOKEN_MANAGEMENT, ctx: &mut TxContext) {
         let (treasury_cap, metadata) = coin::create_currency(
-            LUX {},
+            witness,
             9,
             b"LUX",
             b"VeraLux Token",
@@ -112,19 +119,19 @@ module veralux::token_management {
             option::none(),
             ctx
         );
-        transfer::public_freeze_object(metadata);
+        sui::transfer::public_freeze_object(metadata);
 
         let config = TokenConfig {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             total_minted: 0,
-            mint_authority: tx_context::sender(ctx),
-            staking_contract: @0xStakingContract,  // Replace after staking deployment
-            treasury_address: @0xTreasuryAddress,  // Replace with actual treasury
+            mint_authority: sui::tx_context::sender(ctx),
+            staking_contract: @0x1,  // Replace after staking deployment
+            treasury_address: @0x2,  // Replace with actual treasury
             tax_rate: 400,  // 4%
             tax_allocations: vector[2500, 2500, 2500, 2500],  // 25% each
             authorities: vector[
-                @0xAuthority1, @0xAuthority2, @0xAuthority3, 
-                @0xAuthority4, @0xAuthority5
+                @0x3, @0x4, @0x5, 
+                @0x6, @0x7
             ],  // Replace with actual multisig addresses
             required_signers: 3,
             pause_flag: false,
@@ -137,46 +144,51 @@ module veralux::token_management {
             pause_timelock_end: 0,
             pause_update_voters: vector::empty(),
             treasury_cap,
-            governance_address: @0xGovernanceAddress,
-            liquidity_address: @0xLiquidityAddress,
-            burn_address: @0xBurnAddress,
+            governance_address: @0x8,
+            liquidity_address: @0x9,
+            burn_address: @0xa,
         };
-        transfer::public_share_object(config);
+        sui::transfer::share_object(config);
 
         let registry = UserRegistry {
-            id: object::new(ctx),
+            id: sui::object::new(ctx),
             users: table::new<address, UserData>(ctx),
         };
-        transfer::public_share_object(registry);
+        sui::transfer::share_object(registry);
     }
 
-    // Initial distribution function (called after init)
+    // Initial distribution function (called after init) - Fixed vector usage
     public entry fun initial_distribution(config: &mut TokenConfig, ctx: &mut TxContext) {
-        assert!(tx_context::sender(ctx) == config.mint_authority, E_UNAUTHORIZED);
+        assert!(sui::tx_context::sender(ctx) == config.mint_authority, E_UNAUTHORIZED);
         assert!(config.total_minted == 0, E_SUPPLY_EXCEEDED);  // Ensure only called once
 
+        // Create proper allocation vector using struct
         let allocations = vector[
-            (@0xPrivateSale, TOTAL_SUPPLY / 10),        // Private sale: 10%
-            (@0xPresale, TOTAL_SUPPLY / 10),            // Presale: 10%
-            (@0xLiquidityPool, TOTAL_SUPPLY / 10),      // Liquidity: 10%
-            (@0xAirdrop, TOTAL_SUPPLY / 5),             // Airdrop: 20%
-            (@0xStakingRewards, TOTAL_SUPPLY / 10),     // Staking: 10%
-            (@0xTeam, TOTAL_SUPPLY * 15 / 100),        // Team: 15%
-            (@0xMarketing, TOTAL_SUPPLY / 4)            // Marketing: 25%
+            Allocation { to: @0xb, amount: (TOTAL_SUPPLY / 10) as u64 },        // Private sale: 10%
+            Allocation { to: @0xc, amount: (TOTAL_SUPPLY / 10) as u64 },        // Presale: 10%
+            Allocation { to: @0xd, amount: (TOTAL_SUPPLY / 10) as u64 },        // Liquidity: 10%
+            Allocation { to: @0xe, amount: (TOTAL_SUPPLY / 5) as u64 },         // Airdrop: 20%
+            Allocation { to: @0xf, amount: (TOTAL_SUPPLY / 10) as u64 },        // Staking: 10%
+            Allocation { to: @0x10, amount: (TOTAL_SUPPLY * 15 / 100) as u64 }, // Team: 15%
+            Allocation { to: @0x11, amount: (TOTAL_SUPPLY / 4) as u64 }         // Marketing: 25%
         ];
 
         let mut i = 0;
         while (i < vector::length(&allocations)) {
-            let (to, amount) = *vector::borrow(&allocations, i);
-            mint_internal(config, to, amount, ctx);
-            event::emit(MintEvent { amount, to, epoch: tx_context::epoch(ctx) });
+            let allocation = vector::borrow(&allocations, i);
+            mint_internal(config, allocation.to, allocation.amount, ctx);
+            event::emit(MintEvent { 
+                amount: allocation.amount, 
+                to: allocation.to, 
+                epoch: sui::tx_context::epoch(ctx) 
+            });
             i = i + 1;
         };
     }
 
-    // Internal mint function
+    // Internal mint function - Fixed generic type
     fun mint_internal(config: &mut TokenConfig, to: address, amount: u64, ctx: &mut TxContext) {
-        assert!(config.total_minted + amount <= TOTAL_SUPPLY, E_SUPPLY_EXCEEDED);
+        assert!(config.total_minted + amount <= (TOTAL_SUPPLY as u64), E_SUPPLY_EXCEEDED);
         config.total_minted = config.total_minted + amount;
         coin::mint_and_transfer(&mut config.treasury_cap, amount, to, ctx);
     }
@@ -184,12 +196,12 @@ module veralux::token_management {
     // Tax-exempt transfer for privileged addresses
     public entry fun privileged_transfer(
         config: &TokenConfig,
-        from: &mut Coin<LUX>, 
+        from: &mut Coin<TOKEN_MANAGEMENT>, 
         to: address, 
         amount: u64, 
         ctx: &mut TxContext
     ) {
-        let sender = tx_context::sender(ctx);
+        let sender = sui::tx_context::sender(ctx);
         assert!(
             sender == config.staking_contract || 
             sender == config.treasury_address || 
@@ -199,14 +211,14 @@ module veralux::token_management {
         assert!(amount > 0 && amount <= coin::value(from), E_INVALID_AMOUNT);
 
         let transfer_coin = coin::split(from, amount, ctx);
-        transfer::public_transfer(transfer_coin, to);
+        sui::transfer::public_transfer(transfer_coin, to);
         
         event::emit(TransferEvent { 
             from: sender, 
             to, 
             amount, 
             tax: 0, 
-            epoch: tx_context::epoch(ctx), 
+            epoch: sui::tx_context::epoch(ctx), 
             taxed: false 
         });
     }
@@ -215,12 +227,12 @@ module veralux::token_management {
     public entry fun transfer(
         config: &mut TokenConfig,
         registry: &mut UserRegistry,
-        from: &mut Coin<LUX>, 
+        from: &mut Coin<TOKEN_MANAGEMENT>, 
         to: address, 
         amount: u64, 
         ctx: &mut TxContext
     ) {
-        let sender = tx_context::sender(ctx);
+        let sender = sui::tx_context::sender(ctx);
         
         // Check if sender is privileged (exempt from tax)
         if (sender == config.mint_authority || 
@@ -246,8 +258,8 @@ module veralux::token_management {
         let user_data = table::borrow_mut(&mut registry.users, sender);
 
         // Cooldown check
-        assert!(tx_context::epoch(ctx) > user_data.last_transfer_epoch, E_COOLDOWN_ACTIVE);
-        user_data.last_transfer_epoch = tx_context::epoch(ctx);
+        assert!(sui::tx_context::epoch(ctx) > user_data.last_transfer_epoch, E_COOLDOWN_ACTIVE);
+        user_data.last_transfer_epoch = sui::tx_context::epoch(ctx);
 
         // Update and check daily transfer history
         update_transfer_history(user_data, amount, ctx);
@@ -264,20 +276,20 @@ module veralux::token_management {
 
         // Transfer net amount
         let net_coin = coin::split(from, net_amount, ctx);
-        transfer::public_transfer(net_coin, to);
+        sui::transfer::public_transfer(net_coin, to);
 
         event::emit(TransferEvent { 
             from: sender, 
             to, 
             amount: net_amount, 
             tax: tax_amount, 
-            epoch: tx_context::epoch(ctx), 
+            epoch: sui::tx_context::epoch(ctx), 
             taxed: true 
         });
     }
 
     // Internal function to distribute tax
-    fun distribute_tax(config: &mut TokenConfig, tax_coin: Coin<LUX>, ctx: &mut TxContext) {
+    fun distribute_tax(config: &mut TokenConfig, mut tax_coin: Coin<TOKEN_MANAGEMENT>, ctx: &mut TxContext) {
         let tax_amount = coin::value(&tax_coin);
         let allocations = &config.tax_allocations;
         
@@ -285,14 +297,14 @@ module veralux::token_management {
         let gov_amount = (tax_amount * *vector::borrow(allocations, 0)) / BASIS_POINTS;
         if (gov_amount > 0) {
             let gov_coin = coin::split(&mut tax_coin, gov_amount, ctx);
-            transfer::public_transfer(gov_coin, config.governance_address);
+            sui::transfer::public_transfer(gov_coin, config.governance_address);
         };
         
         // Liquidity allocation
         let lp_amount = (tax_amount * *vector::borrow(allocations, 1)) / BASIS_POINTS;
         if (lp_amount > 0) {
             let lp_coin = coin::split(&mut tax_coin, lp_amount, ctx);
-            transfer::public_transfer(lp_coin, config.liquidity_address);
+            sui::transfer::public_transfer(lp_coin, config.liquidity_address);
         };
         
         // Burn allocation
@@ -301,14 +313,14 @@ module veralux::token_management {
             let burn_coin = coin::split(&mut tax_coin, burn_amount, ctx);
             let burned = coin::burn(&mut config.treasury_cap, burn_coin);
             config.cumulative_burned = config.cumulative_burned + burned;
-            event::emit(BurnEvent { amount: burned, epoch: tx_context::epoch(ctx) });
+            event::emit(BurnEvent { amount: burned, epoch: sui::tx_context::epoch(ctx) });
         };
         
         // Staking allocation
         let staking_amount = (tax_amount * *vector::borrow(allocations, 3)) / BASIS_POINTS;
         if (staking_amount > 0) {
             let staking_coin = coin::split(&mut tax_coin, staking_amount, ctx);
-            transfer::public_transfer(staking_coin, config.staking_contract);
+            sui::transfer::public_transfer(staking_coin, config.staking_contract);
         };
 
         // Burn any remaining dust
@@ -322,18 +334,18 @@ module veralux::token_management {
 
     // Update user transfer history
     fun update_transfer_history(user_data: &mut UserData, amount: u64, ctx: &mut TxContext) {
-        let current_epoch = tx_context::epoch(ctx);
+        let current_epoch = sui::tx_context::epoch(ctx);
         let history = &mut user_data.sell_history;
         
         // Clean old history and calculate 24h total
-        let mut new_history = vector::empty<(u64, u64)>();
+        let mut new_history = vector::empty<SellRecord>();
         let mut total_24h = 0;
         let mut i = 0;
         while (i < vector::length(history)) {
-            let (epoch, amt) = *vector::borrow(history, i);
-            if (current_epoch - epoch <= DAILY_EPOCH_WINDOW) {
-                vector::push_back(&mut new_history, (epoch, amt));
-                total_24h = total_24h + amt;
+            let record = *vector::borrow(history, i);
+            if (current_epoch - record.epoch <= DAILY_EPOCH_WINDOW) {
+                vector::push_back(&mut new_history, record);
+                total_24h = total_24h + record.amount;
             };
             i = i + 1;
         };
@@ -343,7 +355,7 @@ module veralux::token_management {
         assert!(total_24h + amount <= MAX_DAILY_TRANSFER, E_SUPPLY_EXCEEDED);
         
         // Add current transfer to history
-        vector::push_back(history, (current_epoch, amount));
+        vector::push_back(history, SellRecord { epoch: current_epoch, amount });
     }
 
     // Governance functions for tax updates
@@ -353,7 +365,7 @@ module veralux::token_management {
         new_allocations: vector<u64>, 
         ctx: &mut TxContext
     ) {
-        let sender = tx_context::sender(ctx);
+        let sender = sui::tx_context::sender(ctx);
         assert!(vector::contains(&config.authorities, &sender), E_UNAUTHORIZED);
         assert!(config.tax_timelock_end == 0, E_TIMELOCK_ACTIVE);
         assert!(new_tax_rate <= 1000, E_INVALID_TAX);  // Max 10% tax
@@ -362,12 +374,12 @@ module veralux::token_management {
         
         config.pending_tax_rate = new_tax_rate;
         config.pending_allocations = new_allocations;
-        config.tax_timelock_end = tx_context::epoch(ctx) + TIMELOCK_EPOCHS;
+        config.tax_timelock_end = sui::tx_context::epoch(ctx) + TIMELOCK_EPOCHS;
         config.tax_update_voters = vector[sender];
     }
 
     public entry fun vote_for_tax_update(config: &mut TokenConfig, ctx: &mut TxContext) {
-        let sender = tx_context::sender(ctx);
+        let sender = sui::tx_context::sender(ctx);
         assert!(vector::contains(&config.authorities, &sender), E_UNAUTHORIZED);
         assert!(config.tax_timelock_end > 0, E_INVALID_INPUT);
         
@@ -378,7 +390,7 @@ module veralux::token_management {
 
     public entry fun execute_tax_update(config: &mut TokenConfig, ctx: &mut TxContext) {
         assert!(config.tax_timelock_end > 0, E_TIMELOCK_ACTIVE);
-        assert!(tx_context::epoch(ctx) >= config.tax_timelock_end, E_TIMELOCK_ACTIVE);
+        assert!(sui::tx_context::epoch(ctx) >= config.tax_timelock_end, E_TIMELOCK_ACTIVE);
         assert!(vector::length(&config.tax_update_voters) >= config.required_signers, E_UNAUTHORIZED);
         
         config.tax_rate = config.pending_tax_rate;
@@ -390,24 +402,24 @@ module veralux::token_management {
         
         event::emit(UpdateEvent { 
             change: b"tax_rate_and_allocations", 
-            epoch: tx_context::epoch(ctx) 
+            epoch: sui::tx_context::epoch(ctx) 
         });
     }
 
     // Pause functionality
     public entry fun propose_pause(config: &mut TokenConfig, new_pause_flag: bool, ctx: &mut TxContext) {
-        let sender = tx_context::sender(ctx);
+        let sender = sui::tx_context::sender(ctx);
         assert!(vector::contains(&config.authorities, &sender), E_UNAUTHORIZED);
         assert!(config.pause_timelock_end == 0, E_TIMELOCK_ACTIVE);
         assert!(new_pause_flag != config.pause_flag, E_INVALID_INPUT);
         
         config.pending_pause_flag = new_pause_flag;
-        config.pause_timelock_end = tx_context::epoch(ctx) + PAUSE_TIMELOCK_EPOCHS;
+        config.pause_timelock_end = sui::tx_context::epoch(ctx) + PAUSE_TIMELOCK_EPOCHS;
         config.pause_update_voters = vector[sender];
     }
 
     public entry fun vote_for_pause(config: &mut TokenConfig, ctx: &mut TxContext) {
-        let sender = tx_context::sender(ctx);
+        let sender = sui::tx_context::sender(ctx);
         assert!(vector::contains(&config.authorities, &sender), E_UNAUTHORIZED);
         assert!(config.pause_timelock_end > 0, E_INVALID_INPUT);
         
@@ -418,14 +430,14 @@ module veralux::token_management {
 
     public entry fun execute_pause(config: &mut TokenConfig, ctx: &mut TxContext) {
         assert!(config.pause_timelock_end > 0, E_TIMELOCK_ACTIVE);
-        assert!(tx_context::epoch(ctx) >= config.pause_timelock_end, E_TIMELOCK_ACTIVE);
+        assert!(sui::tx_context::epoch(ctx) >= config.pause_timelock_end, E_TIMELOCK_ACTIVE);
         assert!(vector::length(&config.pause_update_voters) >= config.required_signers, E_UNAUTHORIZED);
         
         config.pause_flag = config.pending_pause_flag;
         config.pause_timelock_end = 0;
         config.pause_update_voters = vector::empty();
         
-        event::emit(PauseEvent { paused: config.pause_flag, epoch: tx_context::epoch(ctx) });
+        event::emit(PauseEvent { paused: config.pause_flag, epoch: sui::tx_context::epoch(ctx) });
     }
 
     // Administrative function to update privileged addresses
@@ -435,7 +447,7 @@ module veralux::token_management {
         new_treasury: address,
         ctx: &mut TxContext
     ) {
-        assert!(tx_context::sender(ctx) == config.mint_authority, E_UNAUTHORIZED);
+        assert!(sui::tx_context::sender(ctx) == config.mint_authority, E_UNAUTHORIZED);
         config.staking_contract = new_staking_contract;
         config.treasury_address = new_treasury;
     }
@@ -452,7 +464,7 @@ module veralux::token_management {
         )
     }
 
-    public fun view_user_data(registry: &UserRegistry, user: address): (u64, vector<(u64, u64)>) {
+    public fun view_user_data(registry: &UserRegistry, user: address): (u64, vector<SellRecord>) {
         if (table::contains(&registry.users, user)) {
             let data = table::borrow(&registry.users, user);
             (data.last_transfer_epoch, data.sell_history)
@@ -461,7 +473,7 @@ module veralux::token_management {
         }
     }
 
-    public fun get_total_supply(): u64 {
+    public fun get_total_supply(): u128 {
         TOTAL_SUPPLY
     }
 

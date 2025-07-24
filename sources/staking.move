@@ -3,11 +3,15 @@ module veralux::staking {
     use sui::transfer;
     use sui::tx_context::{Self, TxContext};
     use sui::coin::{Self, Coin};
+    use sui::balance::{Self, Balance};
     use sui::event;
     use sui::clock::{Self, Clock};
     use sui::table::{Self, Table};
     use std::vector;
-    use veralux::token_management::{Self, LUX};
+    use veralux::token_management::{TOKEN_MANAGEMENT}; // Fixed import
+
+    // Witness struct for module initialization
+    public struct STAKING has drop {}
 
     // Constants
     const BASIS_POINTS: u64 = 10_000;  // For APR and percentage calculations
@@ -43,11 +47,11 @@ module veralux::staking {
     const E_INVALID_AMOUNT: u64 = 8;
     const E_PAUSED: u64 = 9;
 
-    // Shared object for staking pool
-    struct StakePool has key {
+    // Shared object for staking pool - Added 'store' ability
+    public struct StakePool has key, store {
         id: UID,
         total_staked: u64,
-        reward_pool: Coin<LUX>,
+        reward_pool: Balance<TOKEN_MANAGEMENT>, // Fixed type
         admin: address,
         tier_aprs: vector<u64>,  // APRs in basis points [tier1, tier2, tier3]
         positions: Table<address, ID>,  // User address -> StakePosition ID
@@ -56,7 +60,7 @@ module veralux::staking {
     }
 
     // Owned object per user
-    struct StakePosition has key, store {
+    public struct StakePosition has key, store {
         id: UID,
         owner: address,
         amount: u64,
@@ -71,7 +75,7 @@ module veralux::staking {
     }
 
     // Events for transparency
-    struct StakeEvent has copy, drop {
+    public struct StakeEvent has copy, drop {
         user: address,
         amount: u64,
         tier: u64,
@@ -79,7 +83,7 @@ module veralux::staking {
         position_id: ID,
     }
 
-    struct UnstakeEvent has copy, drop {
+    public struct UnstakeEvent has copy, drop {
         user: address,
         amount: u64,
         tier: u64,
@@ -87,7 +91,7 @@ module veralux::staking {
         position_id: ID,
     }
 
-    struct ClaimEvent has copy, drop {
+    public struct ClaimEvent has copy, drop {
         user: address,
         amount: u64,
         tier: u64,
@@ -95,7 +99,7 @@ module veralux::staking {
         position_id: ID,
     }
 
-    struct UpgradeEvent has copy, drop {
+    public struct UpgradeEvent has copy, drop {
         user: address,
         old_tier: u64,
         new_tier: u64,
@@ -104,7 +108,7 @@ module veralux::staking {
         position_id: ID,
     }
 
-    struct RewardTaperingEvent has copy, drop {
+    public struct RewardTaperingEvent has copy, drop {
         old_aprs: vector<u64>,
         new_aprs: vector<u64>,
         total_staked: u64,
@@ -112,11 +116,11 @@ module veralux::staking {
     }
 
     // Initialize staking pool
-    public entry fun init(reward_pool: Coin<LUX>, ctx: &mut TxContext) {
+    fun init(_witness: STAKING, ctx: &mut TxContext) {
         let pool = StakePool {
             id: object::new(ctx),
             total_staked: 0,
-            reward_pool,
+            reward_pool: balance::zero<TOKEN_MANAGEMENT>(), // Fixed type
             admin: tx_context::sender(ctx),
             tier_aprs: vector[1000, 800, 600],  // 10%, 8%, 6% APR initially
             positions: table::new<address, ID>(ctx),
@@ -129,19 +133,19 @@ module veralux::staking {
     // Stake tokens with reputation multiplier support
     public entry fun stake(
         pool: &mut StakePool,
-        tokens: &mut Coin<LUX>,
-        amount: u64,
+        tokens: Coin<TOKEN_MANAGEMENT>, // Fixed type
         tier: u64,
         reputation_multiplier: u64,  // From social interactions (basis points)
         clock: &Clock,
         ctx: &mut TxContext
     ) {
         let sender = tx_context::sender(ctx);
+        let amount = coin::value(&tokens);
+        
         assert!(!pool.paused, E_PAUSED);
         assert!(tier >= 1 && tier <= 3, E_INVALID_TIER);
         assert!(!table::contains(&pool.positions, sender), E_STAKE_EXISTS);
         assert!(amount > 0, E_INVALID_AMOUNT);
-        assert!(coin::value(tokens) >= amount, E_INSUFFICIENT_BALANCE);
         
         // Validate minimum stake for tier
         let min_stake = get_min_stake_for_tier(tier);
@@ -153,8 +157,9 @@ module veralux::staking {
                              else reputation_multiplier;
 
         // Transfer tokens to staking pool
-        let stake_coin = coin::split(tokens, amount, ctx);
-        coin::join(&mut pool.reward_pool, stake_coin);
+        let stake_balance = coin::into_balance(tokens);
+        assert!(balance::value(&stake_balance) >= amount, E_INSUFFICIENT_BALANCE);
+        balance::join(&mut pool.reward_pool, stake_balance);
 
         let current_timestamp = clock::timestamp_ms(clock) / 1000;
         
@@ -195,14 +200,14 @@ module veralux::staking {
     public entry fun unstake(
         pool: &mut StakePool,
         position: &mut StakePosition,
-        clock: &Clock,
+        _clock: &Clock,
         ctx: &mut TxContext
     ) {
         let sender = tx_context::sender(ctx);
         assert!(position.owner == sender, E_UNAUTHORIZED);
         assert!(!pool.paused, E_PAUSED);
         
-        let current_timestamp = clock::timestamp_ms(clock) / 1000;
+        let current_timestamp = clock::timestamp_ms(_clock) / 1000;
         assert!(current_timestamp >= position.lock_end_timestamp, E_LOCK_ACTIVE);
 
         // First call starts cooldown
@@ -224,7 +229,8 @@ module veralux::staking {
         };
 
         // Transfer tokens back to user
-        let unstake_coin = coin::split(&mut pool.reward_pool, amount, ctx);
+        let unstake_balance = balance::split(&mut pool.reward_pool, amount);
+        let unstake_coin = coin::from_balance(unstake_balance, ctx);
         transfer::public_transfer(unstake_coin, sender);
         
         // Update pool state
@@ -265,7 +271,7 @@ module veralux::staking {
         pool: &mut StakePool,
         position: &mut StakePosition,
         current_timestamp: u64,
-        ctx: &mut TxContext
+        _ctx: &mut TxContext
     ) {
         let time_elapsed = current_timestamp - position.last_claim_timestamp;
         if (time_elapsed == 0) return;
@@ -288,9 +294,10 @@ module veralux::staking {
         position.unclaimed_rewards = position.unclaimed_rewards + capped_reward;
         
         if (position.unclaimed_rewards > 0) {
-            assert!(coin::value(&pool.reward_pool) >= position.unclaimed_rewards, E_INSUFFICIENT_BALANCE);
+            assert!(balance::value(&pool.reward_pool) >= position.unclaimed_rewards, E_INSUFFICIENT_BALANCE);
             
-            let reward_coin = coin::split(&mut pool.reward_pool, position.unclaimed_rewards, ctx);
+            let reward_balance = balance::split(&mut pool.reward_pool, position.unclaimed_rewards);
+            let reward_coin = coin::from_balance(reward_balance, _ctx);
             transfer::public_transfer(reward_coin, position.owner);
             
             pool.total_rewards_distributed = pool.total_rewards_distributed + position.unclaimed_rewards;
@@ -314,7 +321,7 @@ module veralux::staking {
     public entry fun upgrade_tier(
         pool: &mut StakePool,
         position: &mut StakePosition,
-        tokens: &mut Coin<LUX>,
+        tokens: Coin<TOKEN_MANAGEMENT>, // Fixed type
         new_tier: u64,
         clock: &Clock,
         ctx: &mut TxContext
@@ -328,15 +335,15 @@ module veralux::staking {
         assert!(position.amount < min_stake, E_INSUFFICIENT_STAKE);
         
         let additional_amount = min_stake - position.amount;
-        assert!(coin::value(tokens) >= additional_amount, E_INSUFFICIENT_BALANCE);
+        let tokens_balance = coin::into_balance(tokens);
+        assert!(balance::value(&tokens_balance) >= additional_amount, E_INSUFFICIENT_BALANCE);
 
         // Claim pending rewards first
         let current_timestamp = clock::timestamp_ms(clock) / 1000;
         claim_rewards_internal(pool, position, current_timestamp, ctx);
 
         // Add tokens to pool
-        let stake_coin = coin::split(tokens, additional_amount, ctx);
-        coin::join(&mut pool.reward_pool, stake_coin);
+        balance::join(&mut pool.reward_pool, tokens_balance);
         
         // Update position and pool
         let old_tier = position.tier;
@@ -385,15 +392,16 @@ module veralux::staking {
     // Admin function to add rewards to pool
     public entry fun add_rewards(
         pool: &mut StakePool,
-        reward_tokens: Coin<LUX>,
+        reward_tokens: Coin<TOKEN_MANAGEMENT>, // Fixed type
         ctx: &mut TxContext
     ) {
         assert!(tx_context::sender(ctx) == pool.admin, E_UNAUTHORIZED);
-        coin::join(&mut pool.reward_pool, reward_tokens);
+        let reward_balance = coin::into_balance(reward_tokens);
+        balance::join(&mut pool.reward_pool, reward_balance);
     }
 
     // Reward tapering logic
-    fun check_and_apply_tapering(pool: &mut StakePool, clock: &Clock) {
+    fun check_and_apply_tapering(pool: &mut StakePool, _clock: &Clock) {
         if (pool.total_staked > TAPERING_THRESHOLD) {
             let reduction_factor = calculate_tapering_factor(pool.total_staked);
             let old_aprs = pool.tier_aprs;
@@ -414,7 +422,7 @@ module veralux::staking {
                 old_aprs,
                 new_aprs,
                 total_staked: pool.total_staked,
-                timestamp: clock::timestamp_ms(clock) / 1000,
+                timestamp: clock::timestamp_ms(_clock) / 1000,
             });
         }
     }
@@ -452,7 +460,8 @@ module veralux::staking {
         let net_amount = amount - penalty;
 
         // Transfer net amount to user
-        let unstake_coin = coin::split(&mut pool.reward_pool, net_amount, ctx);
+        let unstake_balance = balance::split(&mut pool.reward_pool, net_amount);
+        let unstake_coin = coin::from_balance(unstake_balance, ctx);
         transfer::public_transfer(unstake_coin, sender);
 
         // Penalty stays in reward pool
@@ -472,7 +481,7 @@ module veralux::staking {
     // Batch staking for gas efficiency
     public entry fun batch_stake(
         pool: &mut StakePool,
-        tokens: &mut Coin<LUX>,
+        tokens: Coin<TOKEN_MANAGEMENT>, // Fixed type
         amounts: vector<u64>,
         tiers: vector<u64>,
         recipients: vector<address>,
@@ -486,7 +495,9 @@ module veralux::staking {
         assert!(vector::length(&amounts) == vector::length(&reputation_multipliers), E_INVALID_AMOUNT);
         assert!(vector::length(&amounts) <= 10, E_INVALID_AMOUNT); // Limit batch size
 
+        let mut tokens_balance = coin::into_balance(tokens);
         let mut i = 0;
+        
         while (i < vector::length(&amounts)) {
             let amount = *vector::borrow(&amounts, i);
             let tier = *vector::borrow(&tiers, i);
@@ -495,8 +506,8 @@ module veralux::staking {
             
             // Create position for recipient
             let current_timestamp = clock::timestamp_ms(clock) / 1000;
-            let stake_coin = coin::split(tokens, amount, ctx);
-            coin::join(&mut pool.reward_pool, stake_coin);
+            let stake_balance = balance::split(&mut tokens_balance, amount);
+            balance::join(&mut pool.reward_pool, stake_balance);
 
             let position = StakePosition {
                 id: object::new(ctx),
@@ -527,6 +538,14 @@ module veralux::staking {
             });
             
             i = i + 1;
+        };
+        
+        // Handle remaining balance
+        if (balance::value(&tokens_balance) > 0) {
+            let remaining_coin = coin::from_balance(tokens_balance, ctx);
+            transfer::public_transfer(remaining_coin, tx_context::sender(ctx));
+        } else {
+            balance::destroy_zero(tokens_balance);
         };
         
         check_and_apply_tapering(pool, clock);
@@ -561,7 +580,7 @@ module veralux::staking {
     public fun view_pool(pool: &StakePool): (u64, u64, vector<u64>, bool, u64) {
         (
             pool.total_staked, 
-            coin::value(&pool.reward_pool),
+            balance::value(&pool.reward_pool),
             pool.tier_aprs,
             pool.paused,
             pool.total_rewards_distributed
