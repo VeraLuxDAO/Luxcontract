@@ -30,7 +30,17 @@ module veralux::token_management {
     const E_TIMELOCK_ACTIVE: u64 = 6;
     const E_INVALID_AMOUNT: u64 = 7;
     const E_INVALID_ALLOCATIONS: u64 = 8;
-    const E_TREASURY_CALL_FAILED: u64 = 9;
+
+    // Structs
+    public struct TransactionRecord has copy, drop {
+        timestamp_ms: u64,
+        amount: u64,
+    }
+
+    public struct Allocation has copy, drop {
+        to: address,
+        amount: u64,
+    }
 
     // Global configuration
     public struct TokenConfig has key, store {
@@ -68,8 +78,8 @@ module veralux::token_management {
 
     public struct UserData has store {
         last_tx_timestamp: u64,
-        sell_history: vector<(u64, u64)>,  // (timestamp_ms, amount)
-        transfer_history: vector<(u64, u64)>,  // (timestamp_ms, amount)
+        sell_history: vector<TransactionRecord>,
+        transfer_history: vector<TransactionRecord>,
     }
 
     // Events
@@ -158,20 +168,20 @@ module veralux::token_management {
         assert!(config.total_minted == 0, E_SUPPLY_EXCEEDED);
 
         let allocations = vector[
-            (@0xe, (TOTAL_SUPPLY / 10) as u64),  // Private sale: 10%
-            (@0xf, (TOTAL_SUPPLY / 10) as u64),  // Presale: 10%
-            (@0x10, (TOTAL_SUPPLY / 10) as u64), // Liquidity: 10%
-            (@0x11, (TOTAL_SUPPLY / 5) as u64),  // Airdrop: 20%
-            (@0x12, (TOTAL_SUPPLY / 10) as u64), // Staking: 10%
-            (@0x13, (TOTAL_SUPPLY * 15 / 100) as u64), // Team: 15%
-            (@0x14, (TOTAL_SUPPLY / 4) as u64)   // Marketing: 25%
+            Allocation { to: @0xe, amount: (TOTAL_SUPPLY / 10) as u64 },  // Private sale: 10%
+            Allocation { to: @0xf, amount: (TOTAL_SUPPLY / 10) as u64 },  // Presale: 10%
+            Allocation { to: @0x10, amount: (TOTAL_SUPPLY / 10) as u64 }, // Liquidity: 10%
+            Allocation { to: @0x11, amount: (TOTAL_SUPPLY / 5) as u64 },  // Airdrop: 20%
+            Allocation { to: @0x12, amount: (TOTAL_SUPPLY / 10) as u64 }, // Staking: 10%
+            Allocation { to: @0x13, amount: (TOTAL_SUPPLY * 15 / 100) as u64 }, // Team: 15%
+            Allocation { to: @0x14, amount: (TOTAL_SUPPLY / 4) as u64 }   // Marketing: 25%
         ];
 
         let mut i = 0;
         while (i < vector::length(&allocations)) {
-            let (to, amount) = *vector::borrow(&allocations, i);
-            mint_internal(config, to, amount, ctx);
-            event::emit(MintEvent { amount, to, timestamp: tx_context::epoch(ctx) });
+            let allocation = vector::borrow(&allocations, i);
+            mint_internal(config, allocation.to, allocation.amount, ctx);
+            event::emit(MintEvent { amount: allocation.amount, to: allocation.to, timestamp: tx_context::epoch(ctx) });
             i = i + 1;
         };
     }
@@ -228,7 +238,7 @@ module veralux::token_management {
         if (sender == config.mint_authority || sender == config.staking_contract || sender == config.treasury_address) {
             privileged_transfer(config, from, to, amount, clock, ctx);
             return;
-        };
+        }
 
         // Allow zero-amount transfers when paused
         assert!(amount > 0 || !config.pause_flag, E_PAUSED);
@@ -271,12 +281,12 @@ module veralux::token_management {
         // Clean old history and check daily limit
         let mut total_24h = 0;
         let mut i = 0;
-        let mut new_history = vector::empty<(u64, u64)>();
+        let mut new_history = vector::empty<TransactionRecord>();
         while (i < vector::length(history)) {
-            let (ts, amt) = *vector::borrow(history, i);
-            if (current_timestamp - ts <= DAILY_WINDOW_MS) {
-                vector::push_back(&mut new_history, (ts, amt));
-                total_24h = total_24h + amt;
+            let record = *vector::borrow(history, i);
+            if (current_timestamp - record.timestamp_ms <= DAILY_WINDOW_MS) {
+                vector::push_back(&mut new_history, record);
+                total_24h = total_24h + record.amount;
             };
             i = i + 1;
         };
@@ -290,7 +300,6 @@ module veralux::token_management {
         // Process tax
         if (tax_amount > 0) {
             let tax_coin = coin::split(from, tax_amount, ctx);
-            // Placeholder for treasury module call (not implemented here)
             distribute_tax(config, tax_coin, ctx);  // Temporary internal distribution
         };
 
@@ -299,7 +308,7 @@ module veralux::token_management {
         transfer::public_transfer(net_coin, to);
 
         // Update history
-        vector::push_back(history, (current_timestamp, amount));
+        vector::push_back(history, TransactionRecord { timestamp_ms: current_timestamp, amount });
 
         event::emit(TransferEvent {
             from: sender,
@@ -381,7 +390,7 @@ module veralux::token_management {
         };
     }
 
-    public entry fun execute_tax_update(config: &mut TokenConfig, clock: &Clock, ctx: &mut TxContext) {
+    public entry fun execute_tax_update(config: &mut TokenConfig, clock: &Clock, _ctx: &mut TxContext) {
         let current_timestamp = clock::timestamp_ms(clock);
         assert!(config.tax_timelock_end > 0 && current_timestamp >= config.tax_timelock_end, E_TIMELOCK_ACTIVE);
         assert!(vector::length(&config.tax_update_voters) >= config.required_signers, E_UNAUTHORIZED);
@@ -411,8 +420,8 @@ module veralux::token_management {
         config.pause_update_voters = vector[sender];
     }
 
-    public entry fun vote_for_pause(config: &mut TokenConfig, ctx: &mut TxContext) {
-        let sender = personallytx_context::sender(ctx);
+    public entry fun vote_for_pause(config: &mut TokenConfig, _ctx: &mut TxContext) {
+        let sender = tx_context::sender(_ctx);
         assert!(vector::contains(&config.authorities, &sender), E_UNAUTHORIZED);
         assert!(config.pause_timelock_end > 0, E_TIMELOCK_ACTIVE);
         if (!vector::contains(&config.pause_update_voters, &sender)) {
@@ -420,7 +429,7 @@ module veralux::token_management {
         };
     }
 
-    public entry fun execute_pause(config: &mut TokenConfig, clock: &Clock, ctx: &mut TxContext) {
+    public entry fun execute_pause(config: &mut TokenConfig, clock: &Clock, _ctx: &mut TxContext) {
         let current_timestamp = clock::timestamp_ms(clock);
         assert!(config.pause_timelock_end > 0 && current_timestamp >= config.pause_timelock_end, E_TIMELOCK_ACTIVE);
         assert!(vector::length(&config.pause_update_voters) >= config.required_signers, E_UNAUTHORIZED);
@@ -430,31 +439,6 @@ module veralux::token_management {
         config.pause_update_voters = vector::empty();
 
         event::emit(PauseEvent { paused: config.pause_flag, timestamp: current_timestamp });
-    }
-
-    // Exposed interfaces
-    public entry fun stake(
-        pool: &mut veralux::staking::StakePool,
-        tokens: Coin<TOKEN_MANAGEMENT>,
-        tier: u64,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        veralux::staking::stake(pool, tokens, tier, clock, ctx);
-    }
-
-    public entry fun claim_rewards(
-        pool: &mut veralux::staking::StakePool,
-        position: &mut veralux::staking::StakePosition,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        veralux::staking::claim_rewards(pool, position, clock, ctx);
-    }
-
-    // Placeholder for vote (governance module not provided)
-    public entry fun vote(/* params for governance::vote */) {
-        // Assume veralux::governance::vote exists
     }
 
     // Utility functions
@@ -485,7 +469,7 @@ module veralux::token_management {
         )
     }
 
-    public fun view_user_data(registry: &UserRegistry, user: address): (u64, vector<(u64, u64)>, vector<(u64, u64)>) {
+    public fun view_user_data(registry: &UserRegistry, user: address): (u64, vector<TransactionRecord>, vector<TransactionRecord>) {
         if (table::contains(&registry.users, user)) {
             let data = table::borrow(&registry.users, user);
             (data.last_tx_timestamp, data.sell_history, data.transfer_history)

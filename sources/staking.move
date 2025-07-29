@@ -13,7 +13,6 @@ module veralux::staking {
     public struct STAKING has drop {}
 
     // Constants
-    const BASIS_POINTS: u64 = 10_000;
     const SECONDS_PER_WEEK: u64 = 604_800;
     const SECONDS_PER_DAY: u64 = 86_400;
     const MAX_ACCRUAL_WEEKS: u64 = 4;
