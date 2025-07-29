@@ -1,3 +1,4 @@
+#[allow(duplicate_alias)]
 module veralux::token_management {
     use sui::coin::{Self, Coin, TreasuryCap};
     use sui::object::{Self, UID};
@@ -32,7 +33,7 @@ module veralux::token_management {
     const E_INVALID_ALLOCATIONS: u64 = 8;
 
     // Structs
-    public struct TransactionRecord has copy, drop {
+    public struct TransactionRecord has copy, drop, store {
         timestamp_ms: u64,
         amount: u64,
     }
@@ -237,12 +238,12 @@ module veralux::token_management {
         // Check for privileged senders
         if (sender == config.mint_authority || sender == config.staking_contract || sender == config.treasury_address) {
             privileged_transfer(config, from, to, amount, clock, ctx);
-            return;
-        }
+            return
+        };
 
         // Allow zero-amount transfers when paused
-        assert!(amount > 0 || !config.pause_flag, E_PAUSED);
         if (amount == 0) {
+            assert!(!config.pause_flag, E_PAUSED);
             let transfer_coin = coin::split(from, 0, ctx);
             transfer::public_transfer(transfer_coin, to);
             event::emit(TransferEvent {
@@ -253,9 +254,11 @@ module veralux::token_management {
                 timestamp: current_timestamp,
                 taxed: false
             });
-            return;
+            return
         };
 
+        assert!(amount > 0, E_INVALID_AMOUNT);
+        assert!(!config.pause_flag, E_PAUSED);
         assert!(amount <= coin::value(from), E_INSUFFICIENT_BALANCE);
         assert!(amount <= MAX_DAILY_TRANSFER, E_SUPPLY_EXCEEDED);
 
