@@ -16,7 +16,6 @@ module veralux::token_management {
 
     // Constants
     const TOTAL_SUPPLY: u128 = 100_000_000_000_000_000_000;  // 100B LUX with 9 decimals
-    const BASIS_POINTS: u64 = 10_000;  // For percentage calculations
     const MAX_DAILY_SELL: u64 = 100_000_000_000_000_000;  // 0.1% of supply
     const MAX_DAILY_TRANSFER: u64 = 100_000_000_000_000_000;  // 0.1% of supply
     const COOLDOWN_MS: u64 = 60_000;  // 1 minute in milliseconds
@@ -295,7 +294,7 @@ module veralux::token_management {
         ctx: &mut TxContext
     ) {
         let total_tax = coin::value(&tax_coin);
-        let tax_balance = coin::into_balance(tax_coin);
+        let mut tax_balance = coin::into_balance(tax_coin);
         
         // Split equally: 0.5% each = 25% of total tax each
         let quarter_tax = total_tax / 4;
