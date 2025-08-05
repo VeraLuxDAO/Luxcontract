@@ -187,18 +187,32 @@ module veralux::token_management {
     }
 
     // Transfer function with tax logic
-    public entry fun transfer(
-        config: &mut TokenConfig,
-        registry: &mut UserRegistry,
-        from: &mut Coin<TOKEN_MANAGEMENT>,
-        to: address,
-        amount: u64,
-        clock: &Clock,
-        ctx: &mut TxContext
+   public entry fun transfer(
+    config: &mut TokenConfig,
+    treasury: &mut veralux::treasury::TreasuryConfig,
+    registry: &mut UserRegistry,
+    from: &mut Coin<TOKEN_MANAGEMENT>,
+    to: address,
+    amount: u64,
+    clock: &Clock,
+    ctx: &mut TxContext
     ) {
         let sender = tx_context::sender(ctx);
         let current_timestamp = clock::timestamp_ms(clock);
-
+        let tax_bp = if (is_exempt(config, sender, to) || config.phase == 2) 0
+                 else if (vector::contains(&config.dex_addresses, &to)) config.sell_tax_bp // 2%
+                 else if (vector::contains(&config.dex_addresses, &sender)) config.buy_tax_bp // 1%
+                 else config.transfer_tax_bp; // 1%
+        let tax_amount = safe_mul_div(amount, tax_bp, 10000);
+        let net_amount = amount - tax_amount
+        if (tax_amount > 0) {
+            let tax_coin = coin::split(from, tax_amount, ctx);
+            veralux::treasury::receive_tax(treasury, config, tax_coin, clock, ctx);
+            };
+        let net_coin = coin::split(from, net_amount, ctx);
+        transfer::public_transfer(net_coin, to);
+        event::emit(TransferEvent { from: sender, to, amount: net_amount, tax: tax_amount, timestamp: current_timestamp, taxed: tax_bp > 0 });
+        
         // Allow zero-amount transfers even when paused
         if (amount == 0) {
             let transfer_coin = coin::split(from, 0, ctx);
