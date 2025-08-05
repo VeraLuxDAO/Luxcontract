@@ -101,6 +101,20 @@ module veralux::staking {
         new_apr_bp: u64,
         timestamp: u64,
     }
+    public fun get_stake_position_id(pool: &StakePool, user: address): ID {
+        *table::borrow(&pool.positions, user)
+        }
+    public fun get_total_vp(pool: &StakePool): u64 {
+        pool.total_vp
+        }
+    public entry fun update_tier_thresholds(
+        pool: &mut StakePool,
+        new_thresholds: vector<u64>,
+        ctx: &mut TxContext
+        ) {
+            assert!(vector::length(&new_thresholds) == 4, E_INVALID_TIER);
+            TIER_MIN_STAKES = new_thresholds;
+            }
 
     public struct RewardsForfeitedEvent has copy, drop {
         user: address,
